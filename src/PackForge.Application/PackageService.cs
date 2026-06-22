@@ -100,6 +100,37 @@ public sealed class PackageService : IPackageService
     }
 
     /// <summary>
+    /// Directly awaitable: fetches installed packages for all (or a specific) manager.
+    /// </summary>
+    public async Task<IReadOnlyList<PackageRow>> GetInstalledAsync(string? managerId = null)
+    {
+        var result = await RefreshCoreAsync(managerId);
+        return result.Packages;
+    }
+
+    /// <summary>
+    /// Directly awaitable: searches across all installed (or a specific) provider.
+    /// </summary>
+    public async Task<IReadOnlyList<SearchResult>> SearchAsync(string query, string? managerId = null)
+    {
+        var providers = Providers
+            .Where(p => p.IsInstalled() &&
+                        (managerId is null || p.Id.Equals(managerId, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        var tasks = providers
+            .Select(async p =>
+            {
+                try { return await p.SearchAsync(query); }
+                catch { return (IReadOnlyList<SearchResult>)[]; }
+            })
+            .ToList();
+
+        var results = await Task.WhenAll(tasks);
+        return results.SelectMany(r => r).ToList();
+    }
+
+    /// <summary>
     /// Starts a background search across all installed providers.
     /// When done, result lands in HasPendingSearch.
     /// Safe to call from Update() thread.
@@ -113,17 +144,7 @@ public sealed class PackageService : IPackageService
         {
             try
             {
-                var tasks = Providers
-                    .Where(p => p.IsInstalled())
-                    .Select(async p =>
-                    {
-                        try { return await p.SearchAsync(query); }
-                        catch { return (IReadOnlyList<SearchResult>)[]; }
-                    })
-                    .ToList();
-
-                var results = await Task.WhenAll(tasks);
-                _pendingSearch = results.SelectMany(r => r).ToList();
+                _pendingSearch = await SearchAsync(query);
             }
             catch
             {
@@ -160,7 +181,7 @@ public sealed class PackageService : IPackageService
         var installedFlags = GetInstalledFlags();
 
         var tasks = Providers
-            .Where(p => p.IsInstalled() && (filterManagerId is null || p.Id == filterManagerId))
+            .Where(p => p.IsInstalled() && (filterManagerId is null || p.Id.Equals(filterManagerId, StringComparison.OrdinalIgnoreCase)))
             .Select(async p =>
             {
                 try { return await p.GetInstalledAsync(); }
