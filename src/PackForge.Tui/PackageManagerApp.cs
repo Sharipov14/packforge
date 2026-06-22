@@ -1,0 +1,411 @@
+using PackForge.Core;
+using XenoAtom.Terminal;
+using XenoAtom.Terminal.UI;
+using XenoAtom.Terminal.UI.Commands;
+using XenoAtom.Terminal.UI.Controls;
+using XenoAtom.Terminal.UI.Geometry;
+using XenoAtom.Terminal.UI.Input;
+using XenoAtom.Terminal.UI.Styling;
+using Stopwatch = System.Diagnostics.Stopwatch;
+
+namespace PackForge.Tui;
+
+public sealed class PackageManagerApp
+{
+    private readonly AppState _state;
+    private readonly UpdateService _updates;
+    private readonly CommandService _commands;
+    private readonly IPackageService _packageService;
+    private readonly IConfigStore _configStore;
+    private readonly ISystemInterop _systemInterop;
+    private readonly IProcessRunner _processRunner;
+    private readonly Dictionary<AppPage, Visual> _pageCache = [];
+    private readonly CommandPalette _commandPalette = new();
+    private PackageRow? _lastDocTarget;
+
+    public PackageManagerApp(
+        IPackageService packageService,
+        IConfigStore configStore,
+        ISystemInterop systemInterop,
+        IProcessRunner processRunner)
+    {
+        _packageService = packageService;
+        _configStore = configStore;
+        _systemInterop = systemInterop;
+        _processRunner = processRunner;
+
+        _state = new AppState(configStore, packageService);
+        _commands = new CommandService(_state, Navigate, processRunner);
+        _updates = new UpdateService(_state, Navigate, _commands, packageService);
+    }
+
+    public void Run()
+    {
+        var shell = BuildShell();
+
+        RegisterCommands(shell);
+
+        shell.KeyDown((_, e) =>
+        {
+            if (e.Key == TerminalKey.Escape)
+            {
+                Navigate(AppPage.Dashboard);
+                e.Handled = true;
+            }
+        });
+
+        _state.ToastHost.Content(shell);
+        _state.ToastHost.Style(AppTheme.Create());
+
+        _state.IsLoading.Value = true;
+        _packageService.BeginRefresh();
+
+        Terminal.Run(_state.ToastHost, Update);
+    }
+
+    private void RegisterCommands(Visual root)
+    {
+        void Nav(string id, string label, TerminalKey key, AppPage page)
+            => root.AddCommand(new Command
+            {
+                Id = id,
+                Name = label.ToLowerInvariant(),
+                LabelMarkup = $"[primary]{label}[/]",
+                Gesture = new KeyGesture(key),
+                Importance = CommandImportance.Primary,
+                Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
+                Execute = _ => Navigate(page),
+            });
+
+        Nav("App.Nav.Dashboard", "Dashboard", TerminalKey.F1, AppPage.Dashboard);
+        Nav("App.Nav.Details", "Details", TerminalKey.F2, AppPage.PackageDetails);
+        Nav("App.Nav.Logs", "Logs", TerminalKey.F3, AppPage.UpdateLogs);
+        Nav("App.Nav.Settings", "Settings", TerminalKey.F4, AppPage.SourceSettings);
+        Nav("App.Nav.Store", "Store", TerminalKey.F5, AppPage.Store);
+
+        root.AddCommand(new Command
+        {
+            Id = "App.UpdateAll",
+            Name = "update-all",
+            LabelMarkup = "[primary]Update All[/]",
+            Gesture = new KeyGesture(TerminalKey.F6),
+            Importance = CommandImportance.Primary,
+            Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
+            Execute = _ => _updates.StartUpdate(),
+        });
+
+        root.AddCommand(new Command
+        {
+            Id = "App.CommandPalette",
+            Name = "command-palette",
+            LabelMarkup = "[primary]Command Palette[/]",
+            Gesture = new KeyGesture(TerminalChar.CtrlP, TerminalModifiers.Ctrl),
+            Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
+            Execute = _ => _commandPalette.Show(),
+        });
+
+        root.AddCommand(new Command
+        {
+            Id = "App.Help",
+            Name = "help",
+            LabelMarkup = "[primary]Help[/]",
+            Gesture = new KeyGesture(TerminalKey.F12),
+            Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
+            Execute = _ => _state.Notify(
+                "F1 Dashboard · F2 Details · F3 Logs · F4 Settings · F5 Store · F6 Update All · Ctrl+P Palette",
+                ToastSeverity.Info),
+        });
+
+        root.AddCommand(new Command
+        {
+            Id = "App.Exit",
+            Name = "exit",
+            LabelMarkup = "[primary]Exit[/]",
+            Presentation = CommandPresentation.CommandPalette,
+            Execute = _ => _state.ExitRequested.Value = true,
+        });
+    }
+
+    private TerminalLoopResult Update()
+    {
+        if (_state.ExitRequested.Value)
+            return TerminalLoopResult.Stop;
+
+        var now = Stopwatch.GetTimestamp();
+        if (Stopwatch.GetElapsedTime(_state.LastTick, now) < TimeSpan.FromMilliseconds(75))
+            return TerminalLoopResult.Continue;
+
+        _state.LastTick = now;
+
+        if (_packageService.HasPendingResult)
+        {
+            var result = _packageService.TakePendingResult();
+            _state.Packages.Value = result.Packages.Count > 0
+                ? result.Packages
+                : PackageCatalog.FallbackRows;
+            _state.InstalledFlags.Value = result.InstalledFlags;
+            _state.IsLoading.Value = false;
+            _pageCache.Remove(AppPage.Dashboard);
+            _pageCache.Remove(AppPage.SourceSettings);
+        }
+
+        if (_packageService.HasPendingSearch)
+        {
+            _state.SearchResults.Value = _packageService.TakePendingSearch();
+            _state.IsSearching.Value = false;
+        }
+
+        var sel = _state.SelectedPackage.Value;
+        if (!ReferenceEquals(sel, _lastDocTarget))
+        {
+            _lastDocTarget = sel;
+            if (sel is not null)
+            {
+                _state.IsDocLoading.Value = true;
+                _state.SelectedDoc.Value = null;
+                _packageService.BeginDocFetch(sel);
+            }
+        }
+
+        if (_packageService.HasPendingDoc)
+        {
+            var (name, doc) = _packageService.TakePendingDoc();
+            if (_state.SelectedPackage.Value?.Name == name)
+            {
+                _state.SelectedDoc.Value = doc;
+                _state.IsDocLoading.Value = false;
+            }
+        }
+
+        _updates.TickMetrics();
+        _commands.Pump();
+        return TerminalLoopResult.Continue;
+    }
+
+    private Visual BuildShell()
+    {
+        var shell = new Grid()
+            .Rows(
+                new RowDefinition { Height = GridLength.Auto },
+                new RowDefinition { Height = GridLength.Star(1) },
+                new RowDefinition { Height = GridLength.Auto },
+                new RowDefinition { Height = GridLength.Auto })
+            .Columns(
+                new ColumnDefinition { Width = GridLength.Fixed(Layout.SidebarWidth) },
+                new ColumnDefinition { Width = GridLength.Star(1) })
+            .Cell(BuildHeader(), 0, 0, columnSpan: 2)
+            .Cell(BuildSidebar(), 1, 0)
+            .Cell(new DockLayout()
+                    .Content(new ComputedVisual(() => GetPage(_state.Page.Value)).Stretch())
+                    .Bottom(BuildCommandBar())
+                    .Stretch(), 1, 1)
+            .Cell(new CommandBar().HorizontalAlignment(Align.Stretch), 2, 0, columnSpan: 2)
+            .Cell(BuildStatusBar(), 3, 0, columnSpan: 2)
+            .Stretch();
+
+        return shell;
+    }
+
+    private Visual BuildHeader()
+    {
+        var leftSection = new VStack(
+                new Markup("[bold primary]PKG_MGR[/]"),
+                new TextBlock(() => $"Active Session: {GetActiveManagerName()}")
+                    { Wrap = false })
+            .Spacing(0);
+
+        var centerSection = new ComputedVisual(() =>
+            Widgets.TopTabs(_state.Page.Value, Navigate));
+
+        var searchCol = new ColumnDefinition { Width = GridLength.Star(1) }.MaxWidth(Layout.SearchMaxWidth);
+        var rightSection = new HStack(
+                new ComputedVisual(() =>
+                {
+                    var outdated = _state.Packages.Value.Count(p => p.Outdated);
+                    return outdated > 0
+                        ? Widgets.Badge($"⚠ {outdated} updates available", ControlTone.Warning)
+                        : Widgets.Badge("● All packages current", ControlTone.Success);
+                }),
+                new Grid()
+                    .Columns(searchCol)
+                    .Rows(new RowDefinition { Height = GridLength.Auto })
+                    .Cell(new TextBox(_state.SearchQuery).HorizontalAlignment(Align.Stretch), 0, 0))
+            .Spacing(Layout.Item);
+
+        return new Header
+        {
+            Left = leftSection,
+            Center = centerSection,
+            Right = rightSection,
+        };
+    }
+
+    private string GetActiveManagerName()
+    {
+        var id = _state.ActiveManagerId.Value;
+        return _packageService.Providers.FirstOrDefault(p => p.Id == id)?.DisplayName ?? id;
+    }
+
+    private Visual BuildSidebar()
+    {
+        var loadingSpinner = Widgets.Loader("scanning…", () => _state.IsLoading.Value, ControlTone.Primary);
+
+        var managerList = new ComputedVisual(() =>
+        {
+            var flags = _state.InstalledFlags.Value;
+            var visibility = _state.ManagerVisibility.Value;
+            var activeId = _state.ActiveManagerId.Value;
+            var packages = _state.Packages.Value;
+
+            var visibleProviders = _packageService.Providers
+                .Where(p => (flags.TryGetValue(p.Id, out var inst) && inst)
+                         && (visibility.TryGetValue(p.Id, out var v) ? v : true))
+                .ToList();
+
+            var currentActiveId = visibleProviders.Any(p => p.Id == activeId)
+                ? activeId
+                : visibleProviders.FirstOrDefault()?.Id;
+            var items = visibleProviders.Select(p =>
+            {
+                var isInstalled = flags.TryGetValue(p.Id, out var inst) && inst;
+                var isActive = currentActiveId == p.Id;
+                var id = p.Id;
+                var outdatedCount = packages.Count(pkg =>
+                    pkg.ManagerId.Equals(p.Id, StringComparison.OrdinalIgnoreCase) && pkg.Outdated);
+                return Widgets.ManagerNavItem(
+                    p.Id,
+                    p.DisplayName,
+                    isActive,
+                    isInstalled,
+                    () => SelectManager(id),
+                    outdatedCount);
+            }).ToArray();
+
+            return (Visual)new VStack(items).Spacing(Layout.Item);
+        });
+
+        return new Group()
+            .TopLeftText(" MANAGERS ")
+            .Padding(Layout.GroupPad)
+            .Content(new DockLayout()
+                .Content(new ScrollViewer(
+                    new VStack(
+                            new Markup("[dim]Active Repositories[/]"),
+                            loadingSpinner,
+                            managerList)
+                        .Spacing(Layout.Section)))
+                .Bottom(new VStack(
+                        new Rule(),
+                        Widgets.PrimaryButton("UPDATE_ALL", () => _updates.StartUpdate()),
+                        new Button("Help")
+                            .HorizontalAlignment(Align.Stretch)
+                            .Click(() => _state.Notify("F1 Dashboard  F2 Details  F3 Logs  F4 Settings  F5 Store  F6 Update All  Ctrl+P Palette", ToastSeverity.Info)),
+                        new Button("Exit")
+                            .HorizontalAlignment(Align.Stretch)
+                            .Click(() => _state.ExitRequested.Value = true))
+                    .Spacing(Layout.Item)))
+            .Style(GroupStyle.Single)
+            .Stretch();
+    }
+
+    private void SelectManager(string managerId)
+    {
+        _state.ActiveManagerId.Value = managerId;
+        _pageCache.Remove(AppPage.Dashboard);
+        Navigate(AppPage.Dashboard);
+        var flags = _state.InstalledFlags.Value;
+        if (flags.TryGetValue(managerId, out var installed) && installed)
+        {
+            _state.IsLoading.Value = true;
+            _packageService.BeginRefresh();
+        }
+    }
+
+    private Visual BuildCommandBar()
+    {
+        var input = new TextBox(_state.CommandInput)
+            .HorizontalAlignment(Align.Stretch)
+            .KeyDown((_, e) =>
+            {
+                if (e.Key == TerminalKey.Enter)
+                {
+                    _commands.Execute(_state.CommandInput.Value ?? string.Empty);
+                    e.Handled = true;
+                }
+            });
+
+        return new Group()
+            .TopLeftText(" COMMAND ")
+            .Padding(Layout.FieldPad)
+            .HorizontalAlignment(Align.Stretch)
+            .Content(new HStack(
+                    new Markup("[primary]> [/]"),
+                    input)
+                .Spacing(0)
+                .HorizontalAlignment(Align.Stretch));
+    }
+
+    private Visual BuildStatusBar()
+    {
+        return new StatusBar()
+            .LeftText(new TextBlock(() => GetLeftStatusText()))
+            .RightText(new TextBlock(() => GetRightStatusText()));
+    }
+
+    private string GetLeftStatusText()
+    {
+        return _state.Page.Value switch
+        {
+            AppPage.Dashboard =>
+                _state.IsLoading.Value
+                    ? "> scanning managers..."
+                    : $"SYSTEM_OK | {_state.Packages.Value.Count} packages loaded",
+            AppPage.PackageDetails => $"PACKAGE_VIEW | {_state.SelectedPackage.Value?.Name ?? "—"}",
+            AppPage.UpdateLogs =>
+                _state.IsCommandRunning.Value
+                    ? "ACTIVE_UPDATE | running..."
+                    : "UPDATE_READY | No active transactions",
+            AppPage.SourceSettings => "MODE: CONFIGURATION   ENCODING: UTF-8",
+            _ => _state.Status.Value,
+        };
+    }
+
+    private string GetRightStatusText()
+    {
+        return _state.Page.Value switch
+        {
+            AppPage.SourceSettings =>
+                $"{_packageService.Providers.Count(p => _state.InstalledFlags.Value.TryGetValue(p.Id, out var inst) && inst)} sources · SYSTEM_NORMAL",
+            AppPage.UpdateLogs => $"Elapsed: {_state.UpdateClock.Elapsed:hh\\:mm\\:ss}",
+            _ => $"MANAGER: {_state.ActiveManagerId.Value.ToUpper()}",
+        };
+    }
+
+    private Visual GetPage(AppPage page)
+    {
+        if (page == AppPage.SourceSettings)
+            return new SourceSettingsPage(_state, Navigate, _packageService, _configStore, _systemInterop).Build();
+
+        if (_pageCache.TryGetValue(page, out var cached))
+            return cached;
+
+        var visual = page switch
+        {
+            AppPage.Dashboard => new DashboardPage(_state, _updates, Navigate, _packageService).Build(),
+            AppPage.PackageDetails => new PackageDetailsPage(_state, _updates, Navigate, _packageService, _systemInterop).Build(),
+            AppPage.UpdateLogs => new UpdateLogsPage(_state, _updates).Build(),
+            AppPage.Store => new StorePage(_state, _packageService, Navigate).Build(),
+            _ => new DashboardPage(_state, _updates, Navigate, _packageService).Build(),
+        };
+
+        _pageCache.Add(page, visual);
+        return visual;
+    }
+
+    private void Navigate(AppPage page)
+    {
+        _state.Page.Value = page;
+        var title = Widgets.PageTitle(page, page == AppPage.PackageDetails ? _state.SelectedPackage.Value?.Name : null);
+        _state.Status.Value = $"SYSTEM_OK | {title}";
+    }
+}
