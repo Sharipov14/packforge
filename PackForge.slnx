@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PackForge.Application/PackForge.Application.csproj" />
+    <Project Path="src/PackForge.Cli/PackForge.Cli.csproj" />
+    <Project Path="src/PackForge.Core/PackForge.Core.csproj" />
+    <Project Path="src/PackForge.Infrastructure/PackForge.Infrastructure.csproj" />
+    <Project Path="src/PackForge.Plugins/PackForge.Plugins.csproj" />
+    <Project Path="src/PackForge.Tui/PackForge.Tui.csproj" />
+  </Folder>
+</Solution>
