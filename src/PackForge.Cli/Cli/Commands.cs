@@ -22,7 +22,9 @@ internal static class Commands
     public static async Task<int> ListPackagesAsync(
         string managerId, CliOptions opts, IPackageService svc)
     {
-        var packages = await svc.GetInstalledAsync(managerId);
+        var packages = await Output.WithSpinnerAsync(
+            "Loading packages…",
+            () => svc.GetInstalledAsync(managerId));
         var (headers, rows) = Output.FormatPackageRows(packages);
         Output.WriteTable(headers, rows, opts);
         return 0;
@@ -33,7 +35,9 @@ internal static class Commands
     /// <summary>packforge outdated  — all managers.</summary>
     public static async Task<int> OutdatedAsync(CliOptions opts, IPackageService svc)
     {
-        var packages = await svc.GetInstalledAsync();
+        var packages = await Output.WithSpinnerAsync(
+            "Checking for updates…",
+            () => svc.GetInstalledAsync());
         var (headers, rows) = Output.FormatOutdatedRows(packages);
         if (rows.Count == 0)
             Console.WriteLine("All packages are up to date.");
@@ -46,7 +50,9 @@ internal static class Commands
     public static async Task<int> OutdatedForManagerAsync(
         string managerId, CliOptions opts, IPackageService svc)
     {
-        var packages = await svc.GetInstalledAsync(managerId);
+        var packages = await Output.WithSpinnerAsync(
+            "Checking for updates…",
+            () => svc.GetInstalledAsync(managerId));
         var (headers, rows) = Output.FormatOutdatedRows(packages);
         if (rows.Count == 0)
             Console.WriteLine("All packages are up to date.");
@@ -67,7 +73,9 @@ internal static class Commands
             return 2;
         }
 
-        var results = await svc.SearchAsync(query, managerId);
+        var results = await Output.WithSpinnerAsync(
+            "Searching packages…",
+            () => svc.SearchAsync(query, managerId));
         if (results.Count == 0)
         {
             Console.WriteLine("No results found.");
@@ -99,15 +107,22 @@ internal static class Commands
 
         PackageDoc? doc = null;
         string? foundManagerId = null;
-        foreach (var p in providers)
-        {
-            try
+        doc = await Output.WithSpinnerAsync(
+            "Fetching package info…",
+            async () =>
             {
-                doc = await p.GetDocumentationAsync(packageName);
-                if (doc is not null) { foundManagerId = p.Id; break; }
-            }
-            catch { /* try next */ }
-        }
+                foreach (var p in providers)
+                {
+                    try
+                    {
+                        var packageDoc = await p.GetDocumentationAsync(packageName);
+                        if (packageDoc is not null) { foundManagerId = p.Id; return packageDoc; }
+                    }
+                    catch { /* try next */ }
+                }
+                return null;
+            });
+
 
         if (doc is null)
         {

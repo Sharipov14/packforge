@@ -1,8 +1,6 @@
 using System.Text.Json;
 using PackForge.Core;
-using XenoAtom.Terminal;
-using XenoAtom.Terminal.UI;
-using XenoAtom.Terminal.UI.Controls;
+using Spectre.Console;
 
 namespace PackForge.Cli;
 
@@ -33,16 +31,22 @@ internal static class Output
             return;
         }
 
-        // Rich table via XenoAtom.Terminal.UI
-        // Headers/AddRow take params Visual[]; strings implicitly convert one-by-one but not as an array.
-        var headerVisuals = headers.Select(h => (Visual)new TextBlock(h)).ToArray();
-        var table = new Table().Headers(headerVisuals);
+        // Rich table via Spectre.Console
+        var table = new Spectre.Console.Table()
+            .Border(Spectre.Console.TableBorder.Rounded)
+            .Title("[cyan bold]Package Manager Output[/]");
+
+        foreach (var header in headers)
+        {
+            table.AddColumn(header);
+        }
+
         foreach (var row in rows)
         {
-            var rowVisuals = row.Select(cell => (Visual)new TextBlock(cell)).ToArray();
-            table.AddRow(rowVisuals);
+            table.AddRow(row);
         }
-        Terminal.Write(table);
+
+        AnsiConsole.Write(table);
     }
 
     // ── JSON output ──────────────────────────────────────────────────────────
@@ -82,10 +86,10 @@ internal static class Output
     /// </summary>
     public static bool Confirm(string command, bool yes)
     {
-        Console.WriteLine($"  $ {command}");
+        AnsiConsole.MarkupLine($"  [cyan]$[/] {command}");
         if (yes) return true;
 
-        Console.Write("Run? [Y/n] ");
+        AnsiConsole.Write("Run? ");
         var answer = Console.ReadLine()?.Trim();
         // empty = default Y; "n"/"N" = no
         return string.IsNullOrEmpty(answer) || answer.Equals("y", StringComparison.OrdinalIgnoreCase);
@@ -131,8 +135,30 @@ internal static class Output
 
     // ── Simple message helpers ────────────────────────────────────────────────
 
-    public static void Warn(string message) => Console.Error.WriteLine($"warning: {message}");
-    public static void Error(string message) => Console.Error.WriteLine($"error: {message}");
+    public static void Warn(string message) => AnsiConsole.MarkupLine($"[yellow]warning:[/] {message}");
+    public static void Error(string message) => AnsiConsole.MarkupLine($"[red]error:[/] {message}");
+
+    // ── URL helper ──────────────────────────────────────────────────────────────
+
+    private static string EscapeMarkup(string url)
+    {
+        // Escape square brackets for Markup syntax
+        return url.Replace("[", "[[").Replace("]", "]]");
+    }
+
+    // ── Spinner / loader ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Shows a spinner while executing an async operation.
+    /// </summary>
+    public static async Task<T> WithSpinnerAsync<T>(string status, Func<Task<T>> operation)
+    {
+        return await AnsiConsole.Status()
+            .StartAsync($"[cyan]{status}[/]", async ctx =>
+            {
+                return await operation();
+            });
+    }
 
     // ── PackageRow / SearchResult formatters ─────────────────────────────────
 
@@ -171,8 +197,9 @@ internal static class Output
         {
             var prov = providers.FirstOrDefault(p => p.Id.Equals(r.ManagerId, StringComparison.OrdinalIgnoreCase));
             var docsUrl = prov?.PackageUrl(r.Name) ?? "—";
+            var docsUrlFormatted = docsUrl != "—" ? $"[link={EscapeMarkup(docsUrl)}]{docsUrl}[/]" : "—";
             var installCmd = prov?.InstallPackageCommand(r.Name) ?? "—";
-            return new[] { r.Manager, r.Name, r.Version, r.Description, docsUrl, installCmd };
+            return new[] { r.Manager, r.Name, r.Version, r.Description, docsUrlFormatted, installCmd };
         }).ToList();
         return (headers, rows);
     }
@@ -186,7 +213,7 @@ internal static class Output
             p.DisplayName,
             p.Command,
             p.IsInstalled() ? "Yes" : $"No  (install: {p.InstallCommand})",
-            p.InfoUrl
+            $"[link={EscapeMarkup(p.InfoUrl)}]{p.InfoUrl}[/]"
         }).ToList();
         return (headers, rows);
     }
