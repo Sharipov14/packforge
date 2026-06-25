@@ -31,20 +31,18 @@ internal sealed class DashboardPage
                 new ColumnDefinition { Width = GridLength.Star(1) })
             .Rows(new RowDefinition { Height = GridLength.Auto })
             .ColumnGap(Layout.Gap)
-            .Cell(BuildPackagesCard(), 0, 0)
-            .Cell(BuildOutdatedCard(), 0, 1)
-            .Cell(BuildSystemLoadCard(), 0, 2)
-            .Cell(BuildStorageCard(), 0, 3)
+            .Cell(BuildPackagesCard().VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 0)
+            .Cell(BuildOutdatedCard().VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 1)
+            .Cell(BuildSystemLoadCard().VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 2)
+            .Cell(BuildStorageCard().VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 3)
             .HorizontalAlignment(Align.Stretch);
 
         var tableContainer = new ComputedVisual(() => BuildTable()).Stretch();
         var tableScrollViewer = new ScrollViewer(tableContainer).Stretch();
 
         var promptText = SystemInfo.Prompt();
-        var prompt = new Group()
-            .TopLeftText(" COMMAND ")
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(
+        var prompt = Widgets.Panel(" command ", PanelAccent.Warning,
+            new VStack(
                     new Markup($"[success]{promptText}[/] $ [bold]pkgr update --all[/]"),
                     new ComputedVisual(() =>
                     {
@@ -56,64 +54,70 @@ internal sealed class DashboardPage
                     }))
                 .Spacing(Layout.Section));
 
+        bool narrow = _state.Viewport.Value.Columns < Layout.NarrowWidth;
+        if (narrow)
+        {
+            return Widgets.PanelTabs(_state.PanelTab,
+                ("packages", () => tableScrollViewer),
+                ("stats",    () => stats.Pad(Layout.PagePad)));
+        }
+
         return new DockLayout()
             .Top(stats.Pad(Layout.PagePad))
             .Content(tableScrollViewer)
-            .Bottom(prompt)
+            //.Bottom(prompt)
             .Stretch();
     }
 
     private Visual BuildPackagesCard()
     {
-        return new Group()
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(
-                    new Markup("[dim]PACKAGES[/]"),
-                    new TextBlock(() =>
+        return Widgets.Panel(" packages ", PanelAccent.Primary,
+            new VStack(
+                    new Markup("[dim]installed[/]"),
+                    new ComputedVisual(() =>
                     {
                         var all = GetFilteredPackages();
-                        return $"{all.Count}";
+                        var cyanHex = $"#{Palette.Cyan.R:x2}{Palette.Cyan.G:x2}{Palette.Cyan.B:x2}";
+                        return (Visual)new Markup($"[bold {cyanHex}]{all.Count}[/]");
                     }))
                 .Spacing(Layout.Section));
     }
 
     private Visual BuildOutdatedCard()
     {
-        return new Group()
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(
-                    new Markup("[dim]OUTDATED[/]"),
-                    new TextBlock(() =>
+        return Widgets.Panel(" outdated ", PanelAccent.Warning,
+            new VStack(
+                    new Markup("[dim]need update[/]"),
+                    new ComputedVisual(() =>
                     {
                         var outdated = GetFilteredPackages().Count(p => p.Outdated);
-                        return $"{outdated}";
+                        var amberHex = $"#{Palette.Amber.R:x2}{Palette.Amber.G:x2}{Palette.Amber.B:x2}";
+                        return (Visual)new Markup($"[bold {amberHex}]{outdated}[/]");
                     }))
                 .Spacing(Layout.Section));
     }
 
     private Visual BuildSystemLoadCard()
     {
-        var sparkline = new ComputedVisual(() =>
-            (Visual)new Sparkline(_state.CpuHistory).Maximum(1.0).Minimum(0.0));
-
-        return new Group()
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(
-                    new Markup("[dim]SYSTEM_LOAD[/]"),
-                    sparkline,
-                    new TextBlock(() => $"{(int)(_state.CpuUsage.Value * 100)}%"))
+        return Widgets.Panel(" system_load ", PanelAccent.Success,
+            new VStack(
+                    new ComputedVisual(() =>
+                    {
+                        var pct = (int)(_state.CpuUsage.Value * 100);
+                        var greenHex = $"#{Palette.Green.R:x2}{Palette.Green.G:x2}{Palette.Green.B:x2}";
+                        return (Visual)new Markup($"[dim]cpu[/]  [bold {greenHex}]{pct,3}%[/]");
+                    }),
+                    Widgets.Meter(() => _state.CpuUsage.Value, Layout.MeterWidth))
                 .Spacing(Layout.Section));
     }
 
     private static Visual BuildStorageCard()
     {
         var (fraction, label) = SystemInfo.DiskUsage();
-        return new Group()
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(
-                    new Markup("[dim]STORAGE[/]"),
-                    new Markup($"[primary]{label}[/]"),
-                    new ProgressBar().Value(fraction).Style(ProgressBarStyle.Thin))
+        return Widgets.Panel(" storage ", PanelAccent.Store,
+            new VStack(
+                    new Markup($"[dim]disk[/]  [bold]{label}[/]"),
+                    Widgets.Meter(fraction, Layout.MeterWidth))
                 .Spacing(Layout.Section));
     }
 
@@ -121,9 +125,16 @@ internal sealed class DashboardPage
     {
         var rows = GetFilteredPackages();
 
+        var amberHex      = $"#{Palette.Amber.R:x2}{Palette.Amber.G:x2}{Palette.Amber.B:x2}";
+        var outlineHex    = $"#{Palette.OutlineVariant.R:x2}{Palette.OutlineVariant.G:x2}{Palette.OutlineVariant.B:x2}";
+
         var table = new Table()
             .Headers("Package Name", "Installed", "Latest", "Status", "Action")
-            .Style(TableStyle.Grid)
+            .Style(TableStyle.RoundedGrid with
+            {
+                HeaderStyle = Style.None.WithForeground(Palette.Amber) | TextStyle.Bold,
+                BorderStyle = Style.None.WithForeground(Palette.OutlineVariant),
+            })
             .HorizontalAlignment(Align.Stretch);
 
         if (rows.Count == 0)
@@ -158,13 +169,18 @@ internal sealed class DashboardPage
             var nameStyle = isFocused
                 ? ButtonStyle.Default with
                 {
-                    Padding = Thickness.Zero,
-                    Normal = Style.None.WithBackground(Palette.CyanFill).WithForeground(Palette.OnFill),
-                    Hovered = Style.None.WithBackground(Palette.CyanFillBright).WithForeground(Palette.OnFill),
+                    Padding  = Thickness.Zero,
+                    Normal   = Style.None.WithBackground(Palette.CyanFill).WithForeground(Palette.OnFill),
+                    Hovered  = Style.None.WithBackground(Palette.CyanFillBright).WithForeground(Palette.OnFill),
                 }
-                : ButtonStyle.Default with { Padding = Thickness.Zero };
+                : ButtonStyle.Default with
+                {
+                    Padding  = Thickness.Zero,
+                    Normal   = Style.None.WithForeground(Palette.Cyan),
+                    Hovered  = Style.None.WithForeground(Palette.CyanBright),
+                };
             table.AddRow(
-                new Button(new Markup($"[primary]{Widgets.Truncate(pkg.Name, Layout.NameColMax)}[/]"))
+                new Button(new Markup($"{Widgets.Truncate(pkg.Name, Layout.NameColMax)}"))
                     .Style(nameStyle)
                     .Click(() =>
                     {

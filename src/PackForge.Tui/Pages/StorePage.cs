@@ -66,6 +66,7 @@ internal sealed class StorePage
         => new Button(new Markup(() => exp.Value
                 ? "Collapse"
                 : $"Show all (+{total - RowLimit})"))
+            .Tone(ControlTone.Primary)
             .Click(() => exp.Value = !exp.Value);
 
     private Visual ActionCell(IPackageProvider provider, string name, PackageRow? inst)
@@ -117,14 +118,12 @@ internal sealed class StorePage
                 return (Visual)Widgets.Loader($"Searching {_state.StoreQuery.Value ?? string.Empty}…",
                     () => _state.IsSearching.Value, ControlTone.Primary);
             if (string.IsNullOrWhiteSpace(_state.StoreQuery.Value))
-                return (Visual)new TextBlock("Enter a query and press Enter or SEARCH");
-            return (Visual)new TextBlock($"{_state.SearchResults.Value.Count} result(s) for \"{_state.StoreQuery.Value}\"");
+                return (Visual)new Markup("[dim]Enter a query and press Enter or SEARCH[/]");
+            return (Visual)new Markup($"[dim]{_state.SearchResults.Value.Count} result(s) for \"{_state.StoreQuery.Value}\"[/]");
         });
 
-        return new Group()
-            .TopLeftText(" STORE — Search Package Registries ")
-            .Padding(Layout.FieldPad)
-            .Content(new VStack(
+        return Widgets.Panel(" store — search package registries ", PanelAccent.Store,
+            new VStack(
                     new HStack(
                             new Markup("[primary]>[/] "),
                             searchBox,
@@ -167,10 +166,7 @@ internal sealed class StorePage
     {
         var content = new ComputedVisual(() => BuildProviderContent(provider, showInstalled));
 
-        return new Group()
-            .TopLeftText($" {provider.DisplayName.ToUpper()} ")
-            .Padding(Layout.GroupPad)
-            .Content(content)
+        return Widgets.Panel($" {provider.DisplayName.ToLower()} ", PanelAccent.Store, content)
             .HorizontalAlignment(Align.Stretch);
     }
 
@@ -195,8 +191,13 @@ internal sealed class StorePage
 
     private Visual BuildPackageRow(string name, string versionText, ChipTone status, string? description, Visual actions, Action onOpen)
     {
-        var nameButton = new Button(new Markup($"[primary]{Widgets.Truncate(name, Layout.NameColMax)}[/]"))
-            .Style(ButtonStyle.Default with { Padding = Thickness.Zero })
+        var nameButton = new Button(new Markup($"{Widgets.Truncate(name, Layout.NameColMax)}"))
+            .Style(ButtonStyle.Default with
+            {
+                Padding = Thickness.Zero,
+                Normal  = Style.None.WithForeground(Palette.Cyan),
+                Hovered = Style.None.WithForeground(Palette.CyanBright),
+            })
             .Click(onOpen);
 
         var topLine = new Grid()

@@ -59,7 +59,7 @@ internal sealed class PackageDetailsPage
             return new VStack(
                 new Markup("[dim]No package selected. Go to Dashboard and click a package.[/]"),
                 new Button("BACK TO DASHBOARD")
-                    .Tone(ControlTone.Primary)
+                    .Style(Widgets.PrimaryButtonStyle)
                     .Click(() => _navigate(AppPage.Dashboard)))
                 .Spacing(Layout.Section)
                 .Pad(Layout.PagePad);
@@ -97,10 +97,11 @@ internal sealed class PackageDetailsPage
             : "—";
         var architecture = SystemInfo.Architecture();
 
-        var metadata = new Grid()
+        // ── metadata quadrant — single Panel wrapping a 3×2 Star grid of borderless stat cells ──
+        var innerMetaGrid = new Grid()
             .Rows(
-                new RowDefinition { Height = GridLength.Auto },
-                new RowDefinition { Height = GridLength.Auto })
+                new RowDefinition { Height = GridLength.Star(1) },
+                new RowDefinition { Height = GridLength.Star(1) })
             .Columns(
                 new ColumnDefinition { Width = GridLength.Star(1) },
                 new ColumnDefinition { Width = GridLength.Star(1) },
@@ -108,88 +109,138 @@ internal sealed class PackageDetailsPage
             .ColumnGap(Layout.Gap)
             .RowGap(Layout.Section)
             .Cell(new ComputedVisual(() =>
-                Widgets.StatCard("LICENSE", _state.SelectedDoc.Value?.License ?? pkg.License, ControlTone.Primary)), 0, 0)
-            .Cell(Widgets.StatCard("ARCHITECTURE", architecture, ControlTone.Default), 0, 1)
-            .Cell(Widgets.StatCard("INSTALL_DATE", installDate, ControlTone.Default), 0, 2)
+                Widgets.StatCard("LICENSE", _state.SelectedDoc.Value?.License ?? pkg.License, ControlTone.Default))
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 0)
+            .Cell(Widgets.StatCard("ARCHITECTURE", architecture, ControlTone.Default)
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 1)
+            .Cell(Widgets.StatCard("INSTALL_DATE", installDate, ControlTone.Default)
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 2)
             .Cell(new ComputedVisual(() =>
-                Widgets.StatCard("SIZE", _state.SelectedDoc.Value?.Size ?? pkg.Size, ControlTone.Success)), 1, 0)
+                Widgets.StatCard("SIZE", _state.SelectedDoc.Value?.Size ?? pkg.Size, ControlTone.Default))
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 1, 0)
             .Cell(new ComputedVisual(() =>
-                Widgets.StatCard("SOURCE", _state.SelectedDoc.Value?.Homepage ?? pkg.Source, ControlTone.Default)), 1, 1)
+                Widgets.StatCard("SOURCE", _state.SelectedDoc.Value?.Homepage ?? pkg.Source, ControlTone.Default))
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 1, 1)
             .Cell(new ComputedVisual(() =>
-                Widgets.StatCard("LAST_UPDATED", _state.SelectedDoc.Value?.LastModified ?? "—", ControlTone.Default)), 1, 2)
+                Widgets.StatCard("LAST_UPDATED", _state.SelectedDoc.Value?.LastModified ?? "—", ControlTone.Default))
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 1, 2)
             .HorizontalAlignment(Align.Stretch);
 
-        var dependencyTree = BuildDependencyTree(pkg);
+        var metadataPanel = Widgets.Panel(" metadata ", PanelAccent.Info, innerMetaGrid)
+            .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch);
+
+        // ── dependency_tree quadrant ──────────────────────────────────────────────────────────────
+        var dependencyTree = BuildDependencyTree(pkg)
+            .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch);
+
+        // ── documentation quadrant — tabs fixed at top, content scrolls inside the panel ─────────
+        Visual DocTab(string label, DetailsDocTab target)
+            => new Button(new Markup(() =>
+                    _state.DocTab.Value == target ? $"[bold]{label}[/]" : label))
+                .Style(() => _state.DocTab.Value == target
+                    ? ButtonStyle.Default with
+                    {
+                        ShowBorder = false,
+                        Padding    = Layout.FieldPad,
+                        Normal     = Style.None.WithBackground(Palette.CyanFill).WithForeground(Palette.OnFill),
+                        Hovered    = Style.None.WithBackground(Palette.CyanFillBright).WithForeground(Palette.OnFill),
+                        Pressed    = Style.None.WithBackground(Palette.CyanFill).WithForeground(Palette.OnFill),
+                        Focused    = Style.None.WithBackground(Palette.CyanFill).WithForeground(Palette.OnFill),
+                    }
+                    : ButtonStyle.Default with { Padding = Layout.FieldPad })
+                .Click(() => _state.DocTab.Value = target);
 
         var docTabs = new HStack(
-                new Button(new Markup(() =>
-                    _state.DocTab.Value == DetailsDocTab.Readme ? "[bold primary]README.md[/]" : "[dim]README.md[/]"))
-                    .Style(() => ButtonStyle.Default with
-                    {
-                        ShowBorder = _state.DocTab.Value == DetailsDocTab.Readme,
-                        Padding = Layout.FieldPad,
-                    })
-                    .Click(() => _state.DocTab.Value = DetailsDocTab.Readme),
-                new Button(new Markup(() =>
-                    _state.DocTab.Value == DetailsDocTab.Changelog ? "[bold primary]CHANGELOG.md[/]" : "[dim]CHANGELOG.md[/]"))
-                    .Style(() => ButtonStyle.Default with
-                    {
-                        ShowBorder = _state.DocTab.Value == DetailsDocTab.Changelog,
-                        Padding = Layout.FieldPad,
-                    })
-                    .Click(() => _state.DocTab.Value = DetailsDocTab.Changelog))
+                DocTab("README.md",    DetailsDocTab.Readme),
+                DocTab("CHANGELOG.md", DetailsDocTab.Changelog))
             .Spacing(Layout.Gap);
 
         var docContent = new ComputedVisual(() => BuildDocContent(pkg));
 
-        var docPanel = new Group()
-            .TopLeftText(" DOCUMENTATION ")
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(docTabs, docContent).Spacing(Layout.Section));
+        var docPanel = Widgets.Panel(" documentation ", PanelAccent.Info,
+                new VStack(docTabs, new ScrollViewer(docContent).Stretch()).Spacing(Layout.Section))
+            .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch);
 
+        // ── right-bottom quadrant — equal stacked sub-panels in a Star-row nested Grid ──────────
         var isNpm = pkg.ManagerId.Equals("npm", StringComparison.OrdinalIgnoreCase) ||
                     pkg.ManagerId.Equals("yarn", StringComparison.OrdinalIgnoreCase);
+
         Visual rightBottomPanel;
         if (isNpm)
         {
             var histPanel = new ComputedVisual(() =>
             {
                 if (_state.IsDocLoading.Value)
-                    return (Visual)new Group()
-                        .TopLeftText(" DOWNLOAD_ACTIVITY (30d) ")
-                        .Padding(Layout.GroupPad)
-                        .Content(Widgets.Loader("fetching stats…", () => _state.IsDocLoading.Value, ControlTone.Primary));
+                    return (Visual)Widgets.Panel(" download_activity (30d) ", PanelAccent.Primary,
+                        Widgets.Loader("fetching stats…", () => _state.IsDocLoading.Value, ControlTone.Primary));
                 var histValues = GenerateHistValues(pkg.Name, 30);
-                return (Visual)new Group()
-                    .TopLeftText(" DOWNLOAD_ACTIVITY (30d) ")
-                    .Padding(Layout.GroupPad)
-                    .Content(new Markup($"[primary]{Widgets.Histogram(histValues, 30)}[/]"));
+                return (Visual)Widgets.Panel(" download_activity (30d) ", PanelAccent.Primary,
+                    new Markup($"[primary]{Widgets.Histogram(histValues, 30)}[/]"));
             });
-            rightBottomPanel = new VStack(histPanel, BuildPackageMetrics()).Spacing(Layout.Section);
+
+            var (usagePanel, systemPanel) = BuildPackageMetricPanels();
+            rightBottomPanel = new Grid()
+                .Rows(
+                    new RowDefinition { Height = GridLength.Star(1) },
+                    new RowDefinition { Height = GridLength.Star(1) },
+                    new RowDefinition { Height = GridLength.Star(1) })
+                .Columns(new ColumnDefinition { Width = GridLength.Star(1) })
+                .RowGap(Layout.Section)
+                .Cell(histPanel.VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 0)
+                .Cell(usagePanel.VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 1, 0)
+                .Cell(systemPanel.VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 2, 0)
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch);
         }
         else
         {
-            rightBottomPanel = BuildPackageMetrics();
+            var (usagePanel, systemPanel) = BuildPackageMetricPanels();
+            rightBottomPanel = new Grid()
+                .Rows(
+                    new RowDefinition { Height = GridLength.Star(1) },
+                    new RowDefinition { Height = GridLength.Star(1) })
+                .Columns(new ColumnDefinition { Width = GridLength.Star(1) })
+                .RowGap(Layout.Section)
+                .Cell(usagePanel.VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 0, 0)
+                .Cell(systemPanel.VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch), 1, 0)
+                .VerticalAlignment(Align.Stretch).HorizontalAlignment(Align.Stretch);
         }
 
-        var layout = new Grid()
+        bool narrow = _state.Viewport.Value.Columns < Layout.NarrowWidth;
+        if (narrow)
+        {
+            var tabs = Widgets.PanelTabs(_state.PanelTab,
+                ("metadata", () => metadataPanel),
+                ("deps",     () => dependencyTree),
+                ("docs",     () => docPanel),
+                ("metrics",  () => rightBottomPanel));
+            return new DockLayout()
+                .Top(new VStack(header, actions).Spacing(Layout.Section).Pad(Layout.PagePad))
+                .Content(tabs.Pad(Layout.PagePad).Stretch())
+                .Stretch();
+        }
+
+        // ── 2×2 Star main grid — equal width AND height for all four quadrants ─────────────────
+        var mainGrid = new Grid()
             .Rows(
-                new RowDefinition { Height = GridLength.Auto },
-                new RowDefinition { Height = GridLength.Auto },
-                new RowDefinition { Height = GridLength.Auto })
+                new RowDefinition { Height = GridLength.Star(1) },
+                new RowDefinition { Height = GridLength.Star(1) })
             .Columns(
-                new ColumnDefinition { Width = GridLength.Star(2) },
-                new ColumnDefinition { Width = GridLength.Star(1) }.MinWidth(Layout.RightColMin))
+                new ColumnDefinition { Width = GridLength.Star(7) },
+                new ColumnDefinition { Width = GridLength.Star(3) })
             .ColumnGap(Layout.Gap)
             .RowGap(Layout.Section)
-            .Cell(new VStack(header, actions).Spacing(Layout.Section), 0, 0, columnSpan: 2)
-            .Cell(metadata, 1, 0)
-            .Cell(dependencyTree, 1, 1)
-            .Cell(docPanel, 2, 0)
-            .Cell(rightBottomPanel, 2, 1)
-            .HorizontalAlignment(Align.Stretch);
+            .Cell(metadataPanel,    0, 0)
+            .Cell(dependencyTree,   0, 1)
+            .Cell(docPanel,         1, 0)
+            .Cell(rightBottomPanel, 1, 1)
+            .HorizontalAlignment(Align.Stretch)
+            .VerticalAlignment(Align.Stretch);
 
-        return new ScrollViewer(layout.Pad(Layout.PagePad)).Stretch();
+        // ── DockLayout: header+actions pinned at top, panel grid fills the rest ────────────────
+        return new DockLayout()
+            .Top(new VStack(header, actions).Spacing(Layout.Section).Pad(Layout.PagePad))
+            .Content(new ScrollViewer(mainGrid.Pad(Layout.PagePad)).Stretch())
+            .Stretch();
     }
 
     private Visual BuildDocContent(PackageRow pkg)
@@ -248,7 +299,7 @@ internal sealed class PackageDetailsPage
         if (!isInstalled)
         {
             buttons.Add(provider is not null
-                ? (Visual)new Button("INSTALL").Tone(ControlTone.Primary)
+                ? (Visual)new Button("INSTALL").Style(Widgets.PrimaryButtonStyle)
                     .Click(() => SetCommand(provider.InstallPackageCommand(pkg.Name)))
                 : new Markup("[dim](no provider)[/]"));
         }
@@ -256,7 +307,7 @@ internal sealed class PackageDetailsPage
         {
             if (outdated)
             {
-                buttons.Add(new Button("UPDATE_PACKAGE").Tone(ControlTone.Primary)
+                buttons.Add(new Button("UPDATE_PACKAGE").Style(Widgets.PrimaryButtonStyle)
                     .Click(() => _updates.StartUpdate(pkg)));
             }
 
@@ -266,12 +317,12 @@ internal sealed class PackageDetailsPage
                 var name = pkg.Name;
                 buttons.Add(new Button("REINSTALL")
                     .Click(() => SetCommand(prov.InstallPackageCommand(name))));
-                buttons.Add(new Button("UNINSTALL").Tone(ControlTone.Error)
+                buttons.Add(new Button("UNINSTALL").Style(Widgets.PastelRedButtonStyle)
                     .Click(() => SetCommand(prov.RemovePackageCommand(name))));
             }
         }
 
-        buttons.Add(new Button("DOCS").Click(() => OpenDocs(pkg, provider)));
+        buttons.Add(new Button("DOCS").Style(Widgets.PastelBlueButtonStyle).Click(() => OpenDocs(pkg, provider)));
         buttons.Add(new Button("BACK").Click(() => _navigate(AppPage.Dashboard)));
 
         return new WrapHStack([.. buttons]).Spacing(Layout.Item);
@@ -294,10 +345,8 @@ internal sealed class PackageDetailsPage
             root.Children.Add(new TreeNode(new Markup("[dim](no dependencies recorded)[/]")));
         }
 
-        return new Group()
-            .TopLeftText(" DEPENDENCY_TREE ")
-            .Padding(Layout.GroupPad)
-            .Content(new TreeView([root]));
+        return Widgets.Panel(" dependency_tree ", PanelAccent.Info,
+            new TreeView([root]));
     }
 
     private static IReadOnlyList<double> GenerateHistValues(string seed, int days)
@@ -308,29 +357,29 @@ internal sealed class PackageDetailsPage
             .ToList();
     }
 
-    private Visual BuildPackageMetrics()
+    /// <summary>
+    /// Returns the two right-bottom sub-panels as a tuple so callers can place them
+    /// individually in a stretched Star-row Grid instead of an uneven VStack.
+    /// </summary>
+    private (Visual usagePanel, Visual systemPanel) BuildPackageMetricPanels()
     {
-        return new VStack(
-                new Group()
-                    .TopLeftText(" USAGE_EXAMPLES ")
-                    .Padding(Layout.GroupPad)
-                    .Content(new Markup(
-                        """
-                        [dim]# INSTALL[/]
-                        $ [success]pkg_mgr install <package>[/]
+        var usagePanel = Widgets.Panel(" usage_examples ", PanelAccent.Success,
+            new Markup(
+                """
+                [dim]# INSTALL[/]
+                $ [success]pkg_mgr install <package>[/]
 
-                        [dim]# UPDATE[/]
-                        $ [success]pkg_mgr upgrade <package>[/]
-                        """)),
-                new Group()
-                    .TopLeftText(" SYSTEM_STATUS ")
-                    .Padding(Layout.GroupPad)
-                    .Content(new VStack(
-                            new TextBlock(() => $"CPU_USAGE                 {(int)(_state.CpuUsage.Value * 100),6}%"),
-                            new ProgressBar().Value(() => _state.CpuUsage.Value).Style(ProgressBarStyle.Thin),
-                            new TextBlock(() => $"MEM_USAGE        {_state.RamUsage.Value * 16,6:F1} / 16 GB"),
-                            new ProgressBar().Value(() => _state.RamUsage.Value).Style(ProgressBarStyle.Thin))
-                        .Spacing(Layout.Section)))
-            .Spacing(Layout.Section);
+                [dim]# UPDATE[/]
+                $ [success]pkg_mgr upgrade <package>[/]
+                """));
+
+        var systemPanel = Widgets.Panel(" system_status ", PanelAccent.Warning,
+            new VStack(
+                    Widgets.MeterRow("cpu_usage", () => _state.CpuUsage.Value),
+                    Widgets.MeterRow("mem_usage", () => _state.RamUsage.Value,
+                        () => $"{_state.RamUsage.Value * 16:F1} / 16 GB"))
+                .Spacing(Layout.Section));
+
+        return (usagePanel, systemPanel);
     }
 }
