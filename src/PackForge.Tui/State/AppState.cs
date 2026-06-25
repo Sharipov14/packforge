@@ -7,6 +7,7 @@ using Stopwatch = System.Diagnostics.Stopwatch;
 namespace PackForge.Tui;
 
 internal enum DetailsDocTab { Readme, Changelog }
+internal enum FocusZone { None, Sidebar, Table }
 
 internal sealed class AppState
 {
@@ -28,6 +29,9 @@ internal sealed class AppState
     internal readonly State<AppPage> Page = new(AppPage.Dashboard);
     internal readonly State<bool> ExitRequested = new(false);
     internal readonly State<string> Status = new("SYSTEM_OK | Ready");
+    internal readonly State<FocusZone> KeyboardFocus = new(FocusZone.None);
+    internal readonly State<int> DashboardFocusIndex = new(-1);
+    internal readonly State<int> SidebarFocusIndex = new(0);
 
     // ── Update / log state ───────────────────────────────────────────────────
     internal readonly State<double> UpdateProgress = new(0);
