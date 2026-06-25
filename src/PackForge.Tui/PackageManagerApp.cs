@@ -47,10 +47,40 @@ public sealed class PackageManagerApp
 
         shell.KeyDown((_, e) =>
         {
-            if (e.Key == TerminalKey.Escape)
+            switch (e.Key)
             {
-                Navigate(AppPage.Dashboard);
-                e.Handled = true;
+                case TerminalKey.Escape:
+                    _state.KeyboardFocus.Value = FocusZone.None;
+                    Navigate(AppPage.Dashboard);
+                    e.Handled = true;
+                    break;
+
+                case TerminalKey.Tab:
+                    _state.KeyboardFocus.Value = _state.KeyboardFocus.Value switch
+                    {
+                        FocusZone.None => FocusZone.Sidebar,
+                        FocusZone.Sidebar => FocusZone.Table,
+                        _ => FocusZone.None,
+                    };
+                    e.Handled = true;
+                    break;
+
+                case TerminalKey.Up when _state.KeyboardFocus.Value == FocusZone.Sidebar:
+                    NavigateSidebar(-1);
+                    e.Handled = true;
+                    break;
+                case TerminalKey.Down when _state.KeyboardFocus.Value == FocusZone.Sidebar:
+                    NavigateSidebar(+1);
+                    e.Handled = true;
+                    break;
+                case TerminalKey.Up when _state.KeyboardFocus.Value == FocusZone.Table:
+                    NavigateTable(-1);
+                    e.Handled = true;
+                    break;
+                case TerminalKey.Down when _state.KeyboardFocus.Value == FocusZone.Table:
+                    NavigateTable(+1);
+                    e.Handled = true;
+                    break;
             }
         });
 
@@ -112,7 +142,7 @@ public sealed class PackageManagerApp
             Gesture = new KeyGesture(TerminalKey.F12),
             Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
             Execute = _ => _state.Notify(
-                "F1 Dashboard · F2 Details · F3 Logs · F4 Settings · F5 Store · F6 Update All · Ctrl+P Palette",
+                "F1-F5 Pages · F6 Update All · Ctrl+P Palette · Tab = cycle zone (Sidebar/Table) · ↑↓ Navigate · Enter Select",
                 ToastSeverity.Info),
         });
 
@@ -123,6 +153,27 @@ public sealed class PackageManagerApp
             LabelMarkup = "[primary]Exit[/]",
             Presentation = CommandPresentation.CommandPalette,
             Execute = _ => _state.ExitRequested.Value = true,
+        });
+
+        // Enter for keyboard navigation: fires in command-dispatch phase (before KeyDown reaches
+        // the focused Button), so it intercepts Enter only when a navigation zone is active.
+        // ConsumesGestureWhenUnavailable = false lets Enter fall through to normal handling
+        // (TextBox execute, Button click) when no zone is active.
+        root.AddCommand(new Command
+        {
+            Id = "App.Nav.Confirm",
+            Name = "nav-confirm",
+            LabelMarkup = string.Empty,
+            Gesture = new KeyGesture(TerminalKey.Enter),
+            Presentation = CommandPresentation.None,
+            Importance = CommandImportance.Tertiary,
+            ConsumesGestureWhenUnavailable = false,
+            CanExecute = _ => _state.KeyboardFocus.Value != FocusZone.None,
+            Execute = _ =>
+            {
+                if (_state.KeyboardFocus.Value == FocusZone.Sidebar) ActivateSidebarItem();
+                else if (_state.KeyboardFocus.Value == FocusZone.Table) ActivateTableItem();
+            },
         });
     }
 
@@ -265,7 +316,9 @@ public sealed class PackageManagerApp
             var currentActiveId = visibleProviders.Any(p => p.Id == activeId)
                 ? activeId
                 : visibleProviders.FirstOrDefault()?.Id;
-            var items = visibleProviders.Select(p =>
+            var sidebarFocusIdx = _state.SidebarFocusIndex.Value;
+            var inSidebarZone = _state.KeyboardFocus.Value == FocusZone.Sidebar;
+            var items = visibleProviders.Select((p, i) =>
             {
                 var isInstalled = flags.TryGetValue(p.Id, out var inst) && inst;
                 var isActive = currentActiveId == p.Id;
@@ -278,28 +331,31 @@ public sealed class PackageManagerApp
                     isActive,
                     isInstalled,
                     () => SelectManager(id),
-                    outdatedCount);
+                    outdatedCount,
+                    isKeyboardFocused: i == sidebarFocusIdx && inSidebarZone);
             }).ToArray();
 
             return (Visual)new VStack(items).Spacing(Layout.Item);
         });
 
+        var sidebarScrollViewer = new ScrollViewer(
+            new VStack(
+                    new Markup("[dim]Active Repositories[/]"),
+                    loadingSpinner,
+                    managerList)
+                .Spacing(Layout.Section));
+
         return new Group()
             .TopLeftText(" MANAGERS ")
             .Padding(Layout.GroupPad)
             .Content(new DockLayout()
-                .Content(new ScrollViewer(
-                    new VStack(
-                            new Markup("[dim]Active Repositories[/]"),
-                            loadingSpinner,
-                            managerList)
-                        .Spacing(Layout.Section)))
+                .Content(sidebarScrollViewer)
                 .Bottom(new VStack(
                         new Rule(),
                         Widgets.PrimaryButton("UPDATE_ALL", () => _updates.StartUpdate()),
                         new Button("Help")
                             .HorizontalAlignment(Align.Stretch)
-                            .Click(() => _state.Notify("F1 Dashboard  F2 Details  F3 Logs  F4 Settings  F5 Store  F6 Update All  Ctrl+P Palette", ToastSeverity.Info)),
+                            .Click(() => _state.Notify("F1-F5 Pages · F6 Update All · Ctrl+P Palette · Tab = cycle zone (Sidebar/Table) · ↑↓ Navigate · Enter Select", ToastSeverity.Info)),
                         new Button("Exit")
                             .HorizontalAlignment(Align.Stretch)
                             .Click(() => _state.ExitRequested.Value = true))
@@ -311,6 +367,7 @@ public sealed class PackageManagerApp
     private void SelectManager(string managerId)
     {
         _state.ActiveManagerId.Value = managerId;
+        _state.DashboardFocusIndex.Value = -1;
         _pageCache.Remove(AppPage.Dashboard);
         Navigate(AppPage.Dashboard);
         var flags = _state.InstalledFlags.Value;
@@ -318,6 +375,65 @@ public sealed class PackageManagerApp
         {
             _state.IsLoading.Value = true;
             _packageService.BeginRefresh();
+        }
+    }
+
+    private IReadOnlyList<IPackageProvider> GetVisibleProviders()
+    {
+        var flags = _state.InstalledFlags.Value;
+        var visibility = _state.ManagerVisibility.Value;
+        return _packageService.Providers
+            .Where(p => (flags.TryGetValue(p.Id, out var inst) && inst)
+                     && (visibility.TryGetValue(p.Id, out var v) ? v : true))
+            .ToList();
+    }
+
+    private void NavigateSidebar(int delta)
+    {
+        var providers = GetVisibleProviders();
+        if (providers.Count == 0) return;
+        _state.SidebarFocusIndex.Value = Math.Clamp(_state.SidebarFocusIndex.Value + delta, 0, providers.Count - 1);
+    }
+
+    private void ActivateSidebarItem()
+    {
+        var providers = GetVisibleProviders();
+        var idx = _state.SidebarFocusIndex.Value;
+        if (idx >= 0 && idx < providers.Count)
+            SelectManager(providers[idx].Id);
+    }
+
+    private IReadOnlyList<PackageRow> GetDashboardRows()
+    {
+        var all = _state.Packages.Value;
+        var managerId = _state.ActiveManagerId.Value;
+        var query = _state.SearchQuery.Value ?? string.Empty;
+        var filtered = all.Where(p =>
+            p.ManagerId.Equals(managerId, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (!string.IsNullOrWhiteSpace(query))
+            filtered = filtered.Where(p =>
+                p.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+        return filtered;
+    }
+
+    private void NavigateTable(int delta)
+    {
+        var rows = GetDashboardRows();
+        if (rows.Count == 0) return;
+        var idx = _state.DashboardFocusIndex.Value;
+        _state.DashboardFocusIndex.Value = delta > 0
+            ? Math.Min(rows.Count - 1, idx < 0 ? 0 : idx + 1)
+            : Math.Max(0, idx <= 0 ? 0 : idx - 1);
+    }
+
+    private void ActivateTableItem()
+    {
+        var rows = GetDashboardRows();
+        var idx = _state.DashboardFocusIndex.Value;
+        if (idx >= 0 && idx < rows.Count)
+        {
+            _state.SelectedPackage.Value = rows[idx];
+            Navigate(AppPage.PackageDetails);
         }
     }
 
@@ -354,12 +470,18 @@ public sealed class PackageManagerApp
 
     private string GetLeftStatusText()
     {
+        var zone = _state.KeyboardFocus.Value switch
+        {
+            FocusZone.Sidebar => " · [Sidebar ↑↓]",
+            FocusZone.Table => " · [Table ↑↓]",
+            _ => " · Tab to navigate",
+        };
         return _state.Page.Value switch
         {
             AppPage.Dashboard =>
                 _state.IsLoading.Value
                     ? "> scanning managers..."
-                    : $"SYSTEM_OK | {_state.Packages.Value.Count} packages loaded",
+                    : $"SYSTEM_OK | {_state.Packages.Value.Count} packages loaded{zone}",
             AppPage.PackageDetails => $"PACKAGE_VIEW | {_state.SelectedPackage.Value?.Name ?? "—"}",
             AppPage.UpdateLogs =>
                 _state.IsCommandRunning.Value

@@ -38,6 +38,7 @@ internal sealed class DashboardPage
             .HorizontalAlignment(Align.Stretch);
 
         var tableContainer = new ComputedVisual(() => BuildTable()).Stretch();
+        var tableScrollViewer = new ScrollViewer(tableContainer).Stretch();
 
         var promptText = SystemInfo.Prompt();
         var prompt = new Group()
@@ -57,7 +58,7 @@ internal sealed class DashboardPage
 
         return new DockLayout()
             .Top(stats.Pad(Layout.PagePad))
-            .Content(new ScrollViewer(tableContainer).Stretch())
+            .Content(tableScrollViewer)
             .Bottom(prompt)
             .Stretch();
     }
@@ -148,12 +149,23 @@ internal sealed class DashboardPage
             return table;
         }
 
-        foreach (var pkg in rows)
+        var focusedIdx = _state.DashboardFocusIndex.Value;
+        var inTableZone = _state.KeyboardFocus.Value == FocusZone.Table;
+        foreach (var (pkg, rowIdx) in rows.Select((p, i) => (p, i)))
         {
             var selected = pkg;
+            var isFocused = rowIdx == focusedIdx && inTableZone;
+            var nameStyle = isFocused
+                ? ButtonStyle.Default with
+                {
+                    Padding = Thickness.Zero,
+                    Normal = Style.None.WithBackground(Palette.CyanFill).WithForeground(Palette.OnFill),
+                    Hovered = Style.None.WithBackground(Palette.CyanFillBright).WithForeground(Palette.OnFill),
+                }
+                : ButtonStyle.Default with { Padding = Thickness.Zero };
             table.AddRow(
                 new Button(new Markup($"[primary]{Widgets.Truncate(pkg.Name, Layout.NameColMax)}[/]"))
-                    .Style(ButtonStyle.Default with { Padding = Thickness.Zero })
+                    .Style(nameStyle)
                     .Click(() =>
                     {
                         _state.SelectedPackage.Value = selected;

@@ -138,7 +138,8 @@ internal static class Widgets
         bool isActive,
         bool isInstalled,
         Action onClick,
-        int outdatedCount = 0)
+        int outdatedCount = 0,
+        bool isKeyboardFocused = false)
     {
         string label;
         if (!isInstalled)
@@ -153,7 +154,8 @@ internal static class Widgets
         else
         {
             var badge = outdatedCount > 0 ? $"  [warning]{Glyphs.Warning}{outdatedCount}[/]" : string.Empty;
-            label = $"  {displayName}{badge}";
+            var prefix = isKeyboardFocused ? "[primary]▶[/]" : " ";
+            label = $"{prefix} {displayName}{badge}";
         }
 
         return new Button(new Markup(label))
