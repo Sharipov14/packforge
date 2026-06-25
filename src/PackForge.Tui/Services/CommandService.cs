@@ -11,6 +11,9 @@ internal sealed class CommandService
     private volatile CancellationTokenSource? _cts;
     private volatile string? _pendingFinalStatus;
     private volatile bool _completed;
+    private DateTime _commandStartTime;
+    private int _commandLogLinesCount;
+    private volatile int _exitCode;
 
     internal CommandService(AppState state, Action<AppPage> navigate, IProcessRunner processRunner)
     {
@@ -30,10 +33,14 @@ internal sealed class CommandService
             return;
         }
 
+        _commandStartTime = DateTime.Now;
+        _commandLogLinesCount = 0;
         _state.CommandInput.Value = string.Empty;
         _state.IsCommandRunning.Value = true;
         _state.UpdateClock.Restart();
-        _state.CommandLogQueue.Enqueue(($"$ {input}", false));
+
+        _state.CommandLogQueue.Enqueue((FormatDivider(), false));
+        _state.CommandLogQueue.Enqueue((FormatCommandHeader(input), false));
         _state.Status.Value = $"RUNNING | {input}";
         _navigate(AppPage.UpdateLogs);
 
@@ -46,27 +53,30 @@ internal sealed class CommandService
                 var exit = await _processRunner.RunStreamingAsync(
                     input,
                     l => _state.CommandLogQueue.Enqueue((l, false)),
-                    l => _state.CommandLogQueue.Enqueue((l, true)),
+                    l => _state.CommandLogQueue.Enqueue((FormatErrorLine(l), true)),
                     cts.Token);
+                _exitCode = exit;
+                var duration = DateTime.Now - _commandStartTime;
+                _state.CommandLogQueue.Enqueue((FormatCommandFooter(duration, _commandLogLinesCount, exit), false));
                 if (exit == 0)
                 {
-                    _state.CommandLogQueue.Enqueue(("[OK] exit 0", false));
                     _pendingFinalStatus = $"DONE | {input}";
                 }
                 else
                 {
-                    _state.CommandLogQueue.Enqueue(($"exit {exit}", true));
                     _pendingFinalStatus = $"FAILED ({exit}) | {input}";
                 }
             }
             catch (OperationCanceledException)
             {
-                _state.CommandLogQueue.Enqueue(("[ABORT] command cancelled", true));
+                _state.CommandLogQueue.Enqueue(("[bold yellow]⋯[/] [yellow]Command cancelled[/]", false));
+                _state.CommandLogQueue.Enqueue((FormatDivider(), false));
                 _pendingFinalStatus = "ABORTED";
             }
             catch (Exception ex)
             {
-                _state.CommandLogQueue.Enqueue(($"error: {ex.Message}", true));
+                _state.CommandLogQueue.Enqueue(($"[bold red]✗ Error:[/] [red]{ex.Message}[/]", false));
+                _state.CommandLogQueue.Enqueue((FormatDivider(), false));
                 _pendingFinalStatus = "ERROR";
             }
             finally
@@ -81,11 +91,10 @@ internal sealed class CommandService
         var linesAdded = 0;
         while (_state.CommandLogQueue.TryDequeue(out var entry))
         {
-            if (entry.isError)
-                _state.UpdateLog.AppendLine("[ERR] " + entry.text);
-            else
-                _state.UpdateLog.AppendLine(entry.text);
+            _state.UpdateLog.AppendMarkupLine(entry.text);
             linesAdded++;
+            if (!entry.isError)
+                _commandLogLinesCount++;
         }
         if (linesAdded > 0)
             _state.LogLineCount.Value += linesAdded;
@@ -95,6 +104,7 @@ internal sealed class CommandService
             _completed = false;
             _state.IsCommandRunning.Value = false;
             _state.UpdateClock.Stop();
+            _state.CommandLogQueue.Enqueue((FormatDivider(), false));
             if (_pendingFinalStatus is not null)
             {
                 _state.Status.Value = _pendingFinalStatus;
@@ -102,6 +112,25 @@ internal sealed class CommandService
             }
         }
     }
+
+    private string FormatDivider() =>
+        "[cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/]";
+
+    private string FormatCommandHeader(string command) =>
+        $"[bold cyan]▶[/] [bold]{DateTime.Now:HH:mm:ss}[/] [dim]{command}[/]";
+
+    private string FormatCommandFooter(TimeSpan duration, int lines, int exitCode)
+    {
+        var statusIcon = exitCode == 0 ? "[bold green]✓[/]" : "[bold red]✗[/]";
+        var statusColor = exitCode == 0 ? "green" : "red";
+        var formattedDuration = duration.TotalSeconds < 1
+            ? $"{(int)duration.TotalMilliseconds}ms"
+            : $"{(int)duration.TotalSeconds}s";
+        return $"{statusIcon} [{statusColor}]Duration: {formattedDuration}[/] | Lines: {lines} | Exit: {exitCode}";
+    }
+
+    private string FormatErrorLine(string text) =>
+        $"[bold red]✗ {text}[/]";
 
     internal void Abort() => _cts?.Cancel();
 }
