@@ -13,6 +13,7 @@ internal sealed class SourceSettingsPage
     private readonly IPackageService _packageService;
     private readonly IConfigStore _configStore;
     private readonly ISystemInterop _systemInterop;
+    private readonly Action<AppThemeVariant> _onThemeChange;
 
     // Per-provider State<bool> for Switch two-way binding
     private readonly Dictionary<string, State<bool>> _visStates;
@@ -25,13 +26,20 @@ internal sealed class SourceSettingsPage
     private static readonly string _configId =
         $"0x{(uint)Environment.MachineName.GetHashCode() & 0xFFFFFF:X6}";
 
-    internal SourceSettingsPage(AppState state, Action<AppPage> navigate, IPackageService packageService, IConfigStore configStore, ISystemInterop systemInterop)
+    internal SourceSettingsPage(
+        AppState state,
+        Action<AppPage> navigate,
+        IPackageService packageService,
+        IConfigStore configStore,
+        ISystemInterop systemInterop,
+        Action<AppThemeVariant> onThemeChange)
     {
         _state = state;
         _navigate = navigate;
         _packageService = packageService;
         _configStore = configStore;
         _systemInterop = systemInterop;
+        _onThemeChange = onThemeChange;
 
         var visibility = state.ManagerVisibility.Value;
         _visStates = packageService.Providers.ToDictionary(
@@ -45,10 +53,8 @@ internal sealed class SourceSettingsPage
     {
         var flags = _installedFlags;
 
-        var config = new Group()
-            .TopLeftText($" ~/config/sources.yaml  ID: {_configId} ")
-            .Padding(Layout.GroupPad)
-            .Content(new Markup(() =>
+        var config = Widgets.Panel($" ~/config/sources.yaml  id: {_configId} ", PanelAccent.Info,
+            new Markup(() =>
             {
                 var currentFlags = _state.InstalledFlags.Value;
                 var activeSources = _packageService.Providers
@@ -85,21 +91,34 @@ internal sealed class SourceSettingsPage
         {
             var hint = _installHint.Value;
             if (hint is null) return (Visual)new TextBlock("") { Wrap = false };
-            return (Visual)new Group()
-                .TopLeftText(" INSTALL_HINT ")
-                .Padding(1)
-                .Content(new Markup($"[warning]$ {hint}[/]"));
+            return (Visual)Widgets.Panel(" install_hint ", PanelAccent.Warning,
+                new Markup($"[warning]$ {hint}[/]"));
         });
 
-        var sources = new Group()
-            .TopLeftText(" 01. ACTIVE_SOURCES ")
-            .Padding(Layout.GroupPad)
-            .Content(new VStack([.. rows, installHintBlock]).Spacing(Layout.Item));
+        // ── 00. appearance ────────────────────────────────────────────────────
+        var isDark  = new Button("[ DARK ]")
+            .Style(_state.ThemeVariant.Value == AppThemeVariant.GruvboxDark
+                ? Widgets.PrimaryButtonStyle
+                : ButtonStyle.Default)
+            .Click(() => _onThemeChange(AppThemeVariant.GruvboxDark));
+        var isLight = new Button("[ LIGHT ]")
+            .Style(_state.ThemeVariant.Value == AppThemeVariant.GruvboxLight
+                ? Widgets.PrimaryButtonStyle
+                : ButtonStyle.Default)
+            .Click(() => _onThemeChange(AppThemeVariant.GruvboxLight));
 
-        var addSource = new Group()
-            .TopLeftText(" 02. CONFIG.SOURCES.ADD ")
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(
+        var appearance = Widgets.Panel(" 00. appearance ", PanelAccent.Info,
+            new HStack(
+                    new Markup("DARK / LIGHT").HorizontalAlignment(Align.Stretch),
+                    new HStack(isDark, isLight).Spacing(1))
+                .Spacing(Layout.Item)
+                .HorizontalAlignment(Align.Stretch));
+
+        var sources = Widgets.Panel(" 01. active_sources ", PanelAccent.Primary,
+            new VStack([.. rows, installHintBlock]).Spacing(Layout.Item));
+
+        var addSource = Widgets.Panel(" 02. config.sources.add ", PanelAccent.Warning,
+            new VStack(
                     "SOURCE NAME",
                     new HStack(
                         new Markup("[dim]> [/]"),
@@ -137,12 +156,10 @@ internal sealed class SourceSettingsPage
             return (Visual)new Markup(string.Join("\n", lines));
         });
 
-        var diagnostics = new Group()
-            .TopLeftText(" 03. SYSTEM_VERIFICATION ")
-            .Padding(Layout.GroupPad)
-            .Content(new VStack(
+        var diagnostics = Widgets.Panel(" 03. system_verification ", PanelAccent.Danger,
+            new VStack(
                     new HStack(
-                            new TextBlock("TESTING CONNECTION TO ALL ENDPOINTS...").HorizontalAlignment(Align.Stretch),
+                            new Markup("[dim]TESTING CONNECTION TO ALL ENDPOINTS...[/]").HorizontalAlignment(Align.Stretch),
                             new Button("RUN_DIAGNOSTICS").Click(RunDiagnostics))
                         .Spacing(Layout.Item),
                     diagResultsBlock)
@@ -151,12 +168,27 @@ internal sealed class SourceSettingsPage
         var actions = new HStack(
                 new Button("RESTORE_DEFAULTS").Click(RestoreDefaults),
                 new Button("CANCEL").Click(() => _navigate(AppPage.Dashboard)),
-                new Button("SAVE_CHANGES").Tone(ControlTone.Primary).Click(SaveSettings))
+                new Button("SAVE_CHANGES").Style(Widgets.PrimaryButtonStyle).Click(SaveSettings))
             .Spacing(1)
             .HorizontalAlignment(Align.End);
 
+        bool narrow = _state.Viewport.Value.Columns < Layout.NarrowWidth;
+        if (narrow)
+        {
+            var tabs = Widgets.PanelTabs(_state.PanelTab,
+                ("config",  () => new ScrollViewer(new VStack(config, appearance).Spacing(Layout.Section).Pad(Layout.PagePad)).Stretch()),
+                ("sources", () => new ScrollViewer(sources.Pad(Layout.PagePad)).Stretch()),
+                ("add",     () => new ScrollViewer(addSource.Pad(Layout.PagePad)).Stretch()),
+                ("verify",  () => new ScrollViewer(diagnostics.Pad(Layout.PagePad)).Stretch()));
+            return new DockLayout()
+                .Content(tabs.Stretch())
+                .Bottom(actions.Pad(Layout.PagePad))
+                .Stretch();
+        }
+
         var content = new Grid()
             .Rows(
+                new RowDefinition { Height = GridLength.Auto },
                 new RowDefinition { Height = GridLength.Auto },
                 new RowDefinition { Height = GridLength.Auto },
                 new RowDefinition { Height = GridLength.Auto },
@@ -168,15 +200,19 @@ internal sealed class SourceSettingsPage
             .RowGap(Layout.Section)
             .Cell(new VStack(
                     new Markup("[bold primary]SOURCE SETTINGS[/]"),
-                    new TextBlock("Manage package repository definitions and environment mapping."))
+                    new Markup("[dim]Manage package repository definitions and environment mapping.[/]"))
                 .Spacing(Layout.Section), 0, 0, columnSpan: 2)
             .Cell(config, 1, 0, columnSpan: 2)
-            .Cell(sources, 2, 0)
-            .Cell(addSource, 2, 1)
-            .Cell(new VStack(diagnostics, actions).Spacing(Layout.Section), 3, 0, columnSpan: 2)
+            .Cell(appearance, 2, 0, columnSpan: 2)
+            .Cell(sources.HorizontalAlignment(Align.Stretch), 3, 0)
+            .Cell(addSource.HorizontalAlignment(Align.Stretch), 3, 1)
+            .Cell(diagnostics.HorizontalAlignment(Align.Stretch), 4, 0, columnSpan: 2)
             .HorizontalAlignment(Align.Stretch);
 
-        return new ScrollViewer(content.Pad(Layout.PagePad)).Stretch();
+        return new DockLayout()
+            .Content(new ScrollViewer(content.Pad(Layout.PagePad)).Stretch())
+            .Bottom(actions.Pad(new Thickness(Layout.PagePad.Left, 0, Layout.PagePad.Right, Layout.PagePad.Bottom)))
+            .Stretch();
     }
 
     private void OnInstall(IPackageProvider provider)
@@ -235,7 +271,7 @@ internal sealed class SourceSettingsPage
             st.Value = true;
         var allVisible = _visStates.ToDictionary(kvp => kvp.Key, _ => true);
         _state.ManagerVisibility.Value = allVisible;
-        _configStore.Save(new AppConfig { ManagerVisibility = new Dictionary<string, bool>(allVisible) });
+        _configStore.Save(_state.BuildConfigSnapshot());
         _state.SourceName.Value = "PyPI_Mirror";
         _state.Endpoint.Value = "https://pypi.org/simple";
         _state.ApiKey.Value = string.Empty;
@@ -246,7 +282,7 @@ internal sealed class SourceSettingsPage
     {
         var dict = _visStates.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.Value);
         _state.ManagerVisibility.Value = dict;
-        _configStore.Save(new AppConfig { ManagerVisibility = new Dictionary<string, bool>(dict) });
+        _configStore.Save(_state.BuildConfigSnapshot());
         _state.Notify("Settings saved to ~/.config/pkg_mgr/config.json", ToastSeverity.Success);
     }
 }

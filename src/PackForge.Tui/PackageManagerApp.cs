@@ -41,11 +41,26 @@ public sealed class PackageManagerApp
 
     public void Run()
     {
-        var shell = BuildShell();
+        // Apply the persisted palette before building any visuals.
+        Palette.Apply(_state.ThemeVariant.Value);
+        _state.Viewport.Value = Terminal.Size;
 
-        RegisterCommands(shell);
+        // Wrap the shell in a stable root so commands and KeyDown survive theme-driven rebuilds.
+        var root = new DockLayout()
+            .Content(new ComputedVisual(() =>
+            {
+                // Reading these makes the ComputedVisual re-run on theme OR size changes.
+                _ = _state.ThemeVariant.Value;
+                var size = _state.Viewport.Value;
+                if (size.Columns < Layout.MinWidth || size.Rows < Layout.MinHeight)
+                    return BuildTooSmall(size);
+                return BuildShell(size.Columns < Layout.NarrowWidth);
+            }).Stretch())
+            .Stretch();
 
-        shell.KeyDown((_, e) =>
+        RegisterCommands(root);
+
+        root.KeyDown((_, e) =>
         {
             switch (e.Key)
             {
@@ -84,13 +99,27 @@ public sealed class PackageManagerApp
             }
         });
 
-        _state.ToastHost.Content(shell);
+        _state.ToastHost.Content(root);
         _state.ToastHost.Style(AppTheme.Create());
 
         _state.IsLoading.Value = true;
         _packageService.BeginRefresh();
 
         Terminal.Run(_state.ToastHost, Update);
+    }
+
+    /// <summary>
+    /// Swaps the palette, clears the page cache, re-applies the theme to the toast host,
+    /// updates the shared state (which triggers the reactive shell rebuild), and persists the
+    /// new variant to <c>~/.config/pkg_mgr/config.json</c>.
+    /// </summary>
+    private void ReloadTheme(AppThemeVariant v)
+    {
+        Palette.Apply(v);
+        _pageCache.Clear();
+        _state.ToastHost.Style(AppTheme.Create());
+        _state.ThemeVariant.Value = v;
+        _configStore.Save(_state.BuildConfigSnapshot());
     }
 
     private void RegisterCommands(Visual root)
@@ -100,7 +129,7 @@ public sealed class PackageManagerApp
             {
                 Id = id,
                 Name = label.ToLowerInvariant(),
-                LabelMarkup = $"[primary]{label}[/]",
+                LabelMarkup = label,
                 Gesture = new KeyGesture(key),
                 Importance = CommandImportance.Primary,
                 Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
@@ -117,7 +146,7 @@ public sealed class PackageManagerApp
         {
             Id = "App.UpdateAll",
             Name = "update-all",
-            LabelMarkup = "[primary]Update All[/]",
+            LabelMarkup = "Update All",
             Gesture = new KeyGesture(TerminalKey.F6),
             Importance = CommandImportance.Primary,
             Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
@@ -128,7 +157,7 @@ public sealed class PackageManagerApp
         {
             Id = "App.CommandPalette",
             Name = "command-palette",
-            LabelMarkup = "[primary]Command Palette[/]",
+            LabelMarkup = "Command Palette",
             Gesture = new KeyGesture(TerminalChar.CtrlP, TerminalModifiers.Ctrl),
             Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
             Execute = _ => _commandPalette.Show(),
@@ -138,7 +167,7 @@ public sealed class PackageManagerApp
         {
             Id = "App.Help",
             Name = "help",
-            LabelMarkup = "[primary]Help[/]",
+            LabelMarkup = "Help",
             Gesture = new KeyGesture(TerminalKey.F12),
             Presentation = CommandPresentation.CommandBar | CommandPresentation.CommandPalette,
             Execute = _ => _state.Notify(
@@ -150,7 +179,7 @@ public sealed class PackageManagerApp
         {
             Id = "App.Exit",
             Name = "exit",
-            LabelMarkup = "[primary]Exit[/]",
+            LabelMarkup = "Exit",
             Presentation = CommandPresentation.CommandPalette,
             Execute = _ => _state.ExitRequested.Value = true,
         });
@@ -179,6 +208,10 @@ public sealed class PackageManagerApp
 
     private TerminalLoopResult Update()
     {
+        var vp = Terminal.Size;
+        if (vp.Columns != _state.Viewport.Value.Columns || vp.Rows != _state.Viewport.Value.Rows)
+            _state.Viewport.Value = vp;
+
         if (_state.ExitRequested.Value)
             return TerminalLoopResult.Stop;
 
@@ -233,8 +266,54 @@ public sealed class PackageManagerApp
         return TerminalLoopResult.Continue;
     }
 
-    private Visual BuildShell()
+    private Visual BuildTooSmall(TerminalSize size)
     {
+        string w = size.Columns < Layout.MinWidth ? $"[error]{size.Columns}[/]" : $"{size.Columns}";
+        string h = size.Rows    < Layout.MinHeight ? $"[error]{size.Rows}[/]"    : $"{size.Rows}";
+
+        var msg = new VStack(
+                new Markup("[bold]Terminal size too small:[/]").HorizontalAlignment(Align.Center),
+                new Markup($"Width {w}  Height {h}").HorizontalAlignment(Align.Center),
+                new TextBlock(" "),
+                new Markup("[bold]Needed for current config:[/]").HorizontalAlignment(Align.Center),
+                new Markup($"Width {Layout.MinWidth}  Height {Layout.MinHeight}").HorizontalAlignment(Align.Center))
+            .Spacing(0)
+            .HorizontalAlignment(Align.Center)
+            .VerticalAlignment(Align.Center);
+
+        return new DockLayout().Content(msg.Stretch()).Stretch();
+    }
+
+    private Visual BuildShell(bool isNarrow)
+    {
+        // Clear the page cache to ensure visuals don't have stale parents from the previous tree.
+        _pageCache.Clear();
+
+        if (isNarrow)
+        {
+            var top = new VStack(
+                    BuildCompactHeader(),
+                    BuildManagerStrip(),
+                    new ComputedVisual(() => Widgets.TopTabs(_state.Page.Value, Navigate)))
+                .Spacing(Layout.Item);
+
+            return new Grid()
+                .Rows(
+                    new RowDefinition { Height = GridLength.Auto },
+                    new RowDefinition { Height = GridLength.Star(1) },
+                    new RowDefinition { Height = GridLength.Auto },
+                    new RowDefinition { Height = GridLength.Auto })
+                .Columns(new ColumnDefinition { Width = GridLength.Star(1) })
+                .Cell(top.Pad(Layout.FieldPad), 0, 0)
+                .Cell(new DockLayout()
+                        .Content(new ComputedVisual(() => GetPage(_state.Page.Value)).Stretch())
+                        .Bottom(BuildCommandBar())
+                        .Stretch(), 1, 0)
+                .Cell(new CommandBar().HorizontalAlignment(Align.Stretch), 2, 0)
+                .Cell(BuildStatusBar(), 3, 0)
+                .Stretch();
+        }
+
         var shell = new Grid()
             .Rows(
                 new RowDefinition { Height = GridLength.Auto },
@@ -261,7 +340,7 @@ public sealed class PackageManagerApp
     {
         var leftSection = new VStack(
                 new Markup("[bold primary]PKG_MGR[/]"),
-                new TextBlock(() => $"Active Session: {GetActiveManagerName()}")
+                new Markup(() => $"[dim]Active Session: {GetActiveManagerName()}[/]")
                     { Wrap = false })
             .Spacing(0);
 
@@ -295,6 +374,59 @@ public sealed class PackageManagerApp
     {
         var id = _state.ActiveManagerId.Value;
         return _packageService.Providers.FirstOrDefault(p => p.Id == id)?.DisplayName ?? id;
+    }
+
+    private Visual BuildCompactHeader()
+    {
+        var searchCol = new ColumnDefinition { Width = GridLength.Star(1) }.MaxWidth(Layout.SearchMaxWidth);
+        return new HStack(
+                new Markup("[bold primary]PKG_MGR[/]"),
+                new ComputedVisual(() =>
+                {
+                    var outdated = _state.Packages.Value.Count(p => p.Outdated);
+                    return outdated > 0
+                        ? Widgets.Badge($"⚠ {outdated} updates", ControlTone.Warning)
+                        : Widgets.Badge("● current", ControlTone.Success);
+                }),
+                new Grid()
+                    .Columns(searchCol)
+                    .Rows(new RowDefinition { Height = GridLength.Auto })
+                    .Cell(new TextBox(_state.SearchQuery).HorizontalAlignment(Align.Stretch), 0, 0))
+            .Spacing(Layout.Item)
+            .HorizontalAlignment(Align.Stretch);
+    }
+
+    private Visual BuildManagerStrip()
+    {
+        return new ComputedVisual(() =>
+        {
+            var flags = _state.InstalledFlags.Value;
+            var visibility = _state.ManagerVisibility.Value;
+            var activeId = _state.ActiveManagerId.Value;
+            var packages = _state.Packages.Value;
+
+            var visibleProviders = _packageService.Providers
+                .Where(p => (flags.TryGetValue(p.Id, out var inst) && inst)
+                         && (visibility.TryGetValue(p.Id, out var v) ? v : true))
+                .ToList();
+
+            var currentActiveId = visibleProviders.Any(p => p.Id == activeId)
+                ? activeId
+                : visibleProviders.FirstOrDefault()?.Id;
+
+            var items = visibleProviders.Select(p =>
+            {
+                var isActive = currentActiveId == p.Id;
+                var id = p.Id;
+                var outdatedCount = packages.Count(pkg =>
+                    pkg.ManagerId.Equals(p.Id, StringComparison.OrdinalIgnoreCase) && pkg.Outdated);
+                return (Visual)Widgets.ManagerNavItem(
+                    p.Id, p.DisplayName, isActive, true,
+                    () => SelectManager(id), outdatedCount);
+            }).ToArray();
+
+            return (Visual)new WrapHStack([.. items]).Spacing(Layout.Item).HorizontalAlignment(Align.Start);
+        });
     }
 
     private Visual BuildSidebar()
@@ -345,22 +477,22 @@ public sealed class PackageManagerApp
                     managerList)
                 .Spacing(Layout.Section));
 
-        return new Group()
-            .TopLeftText(" MANAGERS ")
-            .Padding(Layout.GroupPad)
-            .Content(new DockLayout()
-                .Content(sidebarScrollViewer)
-                .Bottom(new VStack(
-                        new Rule(),
-                        Widgets.PrimaryButton("UPDATE_ALL", () => _updates.StartUpdate()),
-                        new Button("Help")
-                            .HorizontalAlignment(Align.Stretch)
-                            .Click(() => _state.Notify("F1-F5 Pages · F6 Update All · Ctrl+P Palette · Tab = cycle zone (Sidebar/Table) · ↑↓ Navigate · Enter Select", ToastSeverity.Info)),
-                        new Button("Exit")
-                            .HorizontalAlignment(Align.Stretch)
-                            .Click(() => _state.ExitRequested.Value = true))
-                    .Spacing(Layout.Item)))
-            .Style(GroupStyle.Single)
+        return Widgets.Panel(" managers ", PanelAccent.Primary,
+                new DockLayout()
+                    .Content(sidebarScrollViewer)
+                    .Bottom(new VStack(
+                            new Rule(),
+                            new Button("UPDATE_ALL")
+                                .HorizontalAlignment(Align.Stretch)
+                                .Click(() => _updates.StartUpdate()),
+                            new Button("Help")
+                                .HorizontalAlignment(Align.Stretch)
+                                .Click(() => _state.Notify("F1-F5 Pages · F6 Update All · Ctrl+P Palette · Tab = cycle zone (Sidebar/Table) · ↑↓ Navigate · Enter Select", ToastSeverity.Info)),
+                            new Button("Exit")
+                                .Style(Widgets.PastelRedButtonStyle)
+                                .HorizontalAlignment(Align.Stretch)
+                                .Click(() => _state.ExitRequested.Value = true))
+                        .Spacing(Layout.Item)))
             .Stretch();
     }
 
@@ -450,15 +582,13 @@ public sealed class PackageManagerApp
                 }
             });
 
-        return new Group()
-            .TopLeftText(" COMMAND ")
-            .Padding(Layout.FieldPad)
-            .HorizontalAlignment(Align.Stretch)
-            .Content(new HStack(
-                    new Markup("[primary]> [/]"),
-                    input)
-                .Spacing(0)
-                .HorizontalAlignment(Align.Stretch));
+        return Widgets.Panel(" command ", PanelAccent.Warning,
+                new HStack(
+                        new Markup("[primary]> [/]"),
+                        input)
+                    .Spacing(0)
+                    .HorizontalAlignment(Align.Stretch))
+            .HorizontalAlignment(Align.Stretch);
     }
 
     private Visual BuildStatusBar()
@@ -506,7 +636,12 @@ public sealed class PackageManagerApp
     private Visual GetPage(AppPage page)
     {
         if (page == AppPage.SourceSettings)
-            return new SourceSettingsPage(_state, Navigate, _packageService, _configStore, _systemInterop).Build();
+            return new SourceSettingsPage(_state, Navigate, _packageService, _configStore, _systemInterop, ReloadTheme).Build();
+
+        // Replace the LogControl's panel content with a placeholder before rebuild to properly
+        // detach the shared LogControl from its old tree (avoids "already has a parent" crash)
+        if (page == AppPage.UpdateLogs && _state.UpdateLog.Parent is Group logPanel)
+            logPanel.Content(new Markup(""));
 
         if (_pageCache.TryGetValue(page, out var cached))
             return cached;
@@ -526,6 +661,7 @@ public sealed class PackageManagerApp
 
     private void Navigate(AppPage page)
     {
+        _state.PanelTab.Value = 0;
         _state.Page.Value = page;
         var title = Widgets.PageTitle(page, page == AppPage.PackageDetails ? _state.SelectedPackage.Value?.Name : null);
         _state.Status.Value = $"SYSTEM_OK | {title}";

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using PackForge.Core;
+using XenoAtom.Terminal;
 using XenoAtom.Terminal.UI;
 using XenoAtom.Terminal.UI.Controls;
 using Stopwatch = System.Diagnostics.Stopwatch;
@@ -11,10 +12,12 @@ internal enum FocusZone { None, Sidebar, Table }
 
 internal sealed class AppState
 {
+    private readonly AppConfig _loadedConfig;
+
     public AppState(IConfigStore configStore, IPackageService packageService)
     {
-        var config = configStore.Load();
-        var visibility = config.ManagerVisibility;
+        _loadedConfig = configStore.Load();
+        var visibility = _loadedConfig.ManagerVisibility;
         // Fill in missing providers with default=true
         foreach (var provider in packageService.Providers)
         {
@@ -23,7 +26,17 @@ internal sealed class AppState
         }
         ManagerVisibility = new State<Dictionary<string, bool>>(visibility);
         InstalledFlags = new State<Dictionary<string, bool>>(packageService.GetInstalledFlags());
+
+        // Parse the persisted theme variant; fall back to GruvboxDark if unknown.
+        var variant = _loadedConfig.Theme == nameof(AppThemeVariant.GruvboxLight)
+            ? AppThemeVariant.GruvboxLight
+            : AppThemeVariant.GruvboxDark;
+        ThemeVariant = new State<AppThemeVariant>(variant);
     }
+
+    // ── Theme ─────────────────────────────────────────────────────────────────
+    /// <summary>Currently active gruvbox variant; changing it triggers a reactive shell rebuild.</summary>
+    internal readonly State<AppThemeVariant> ThemeVariant;
 
     // ── Navigation ───────────────────────────────────────────────────────────
     internal readonly State<AppPage> Page = new(AppPage.Dashboard);
@@ -113,6 +126,12 @@ internal sealed class AppState
     }
 
     // ── Shell ────────────────────────────────────────────────────────────────
+    /// <summary>Current terminal size; updated each frame, drives the responsive shell rebuild.</summary>
+    internal readonly State<TerminalSize> Viewport = new(default);
+
+    /// <summary>Active panel tab in narrow mode (shared; only one page is visible at a time).</summary>
+    internal readonly State<int> PanelTab = new(0);
+
     internal readonly State<string?> CommandInput = new(string.Empty);
     internal readonly State<bool> IsCommandRunning = new(false);
     internal readonly ConcurrentQueue<(string text, bool isError)> CommandLogQueue = new();
@@ -127,4 +146,15 @@ internal sealed class AppState
         Status.Value = message;
         ToastHost.Show(message, severity);
     }
+
+    /// <summary>
+    /// Builds a full <see cref="AppConfig"/> snapshot from the current state so that any
+    /// save operation persists <em>both</em> <see cref="ManagerVisibility"/> and
+    /// <see cref="ThemeVariant"/> without either field overwriting the other.
+    /// </summary>
+    internal AppConfig BuildConfigSnapshot() => new()
+    {
+        ManagerVisibility = new Dictionary<string, bool>(ManagerVisibility.Value),
+        Theme             = ThemeVariant.Value.ToString(),
+    };
 }
